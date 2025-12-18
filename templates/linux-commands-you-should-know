@@ -1,0 +1,50 @@
+# wormhole peer-to-peer file transfer encrypted and secure 
+
+sudo apt install wormhole # install on both servers 
+
+wormhole send file.txt
+wormhole receive file.txt
+
+# command used to combine ping with traceroute to give a real-time showing of latency and packet loss at every hop
+
+mtr
+mtr google.com
+
+# show all hardware devices in detail
+
+lshw
+
+# ripgrep is a significantly faster alternative to grep, optimized for searching large codebases
+
+sudo rg -c "ERROR" /var/log
+sudo rg --files-with-matches API_KEY
+
+# ncdu tool that provides a visual, navigable interface for quickly identifying large files
+
+ncdu 
+
+# duf a better job of visually analyzing the df
+
+duf
+
+# check port mapping 
+
+lsof -i :443
+lsof -i :80 
+
+# check why the startup is slow on your machine or VPS
+
+systemd-analyze blame
+systemd-analyze critical-chain
+
+# docker in a interative way 
+
+curl https://raw.githubusercontent.com/jesseduffield/lazydocker/master/scripts/install_update_linux.sh | bash
+sudo find / -name lazydocker 2>/dev/null
+sudo mv ~/.local/bin/lazydocker /usr/local/bin/
+sudo chmod +x /usr/local/bin/lazydocker
+
+lazydocker 
+
+
+c
