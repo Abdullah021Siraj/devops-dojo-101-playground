@@ -27,6 +27,9 @@ sudo systemctl restart ssh
 # enable firewall
 
 sudo ufw allow [ssh port]
+sudo nano /etc/ssh/sshd_config.d/50-cloud-init.conf # set custom port 
+sudo systemctl restart ssh
+ss -tlnp | grep ssh # verify
 
 # Disable PING 
 
