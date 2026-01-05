@@ -8,6 +8,11 @@ dpkg-reconfigure --priority=low unattended-upgrades
 adduser [username]
 usermod -aG sudo [username]
 
+# verify the user
+
+sudo whoami 
+groups [username]
+
 # create a SSH key & copy the public key to the server
 
 ssh-keygen -b 4096
