@@ -2,7 +2,7 @@ services:
   wordpress:
     image: wordpress:php8.1
     container_name: wordpress_mob
-    mem_limit: 1024m
+    #mem_limit: 1024m
     #cpus: 0.5
     restart: unless-stopped
     ports:
@@ -15,6 +15,8 @@ services:
       #WORDPRESS_CONFIG_EXTRA: |
         #define('WP_HOME'https://server-ip:8081');
         #define('WP_SITEURL','https://server-ip:8081');
+    networks:
+      - network_name
     volumes:
       - ./html:/var/www/html/
     depends_on:
@@ -29,7 +31,28 @@ services:
       MYSQL_DATABASE: wordpress_mob
       MYSQL_USER: wordpress
       MYSQL_PASSWORD: wpassword
+    networks:
+      - network_name
     volumes:
       - db_data:/var/lib/mysql
+
+        # Redis (for cache and session)
+  redis:
+    image: redis:7.0
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+      - /var/www/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - network_name
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    restart: unless-stopped
+
 volumes:
   db_data:
+
+networks:
+  network_name:
+    driver: bridge
