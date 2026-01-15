@@ -1,10 +1,11 @@
 ### Inside fs /etc/docker/daemon.json
 
-#### paste the file provided docker-log...
+##### Paste the file provided docker-log...
 
-```bash 
+#### Restart Docker
 
+```bash
+ 
 sudo systemctl restart docker
-
 
 ```
