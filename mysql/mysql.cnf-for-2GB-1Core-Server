@@ -1,0 +1,35 @@
+[mysqld]
+# ===== Core InnoDB =====
+innodb_buffer_pool_size = 256M
+innodb_buffer_pool_instances = 1
+
+# ===== Redo logs (MySQL 8 way) =====
+innodb_redo_log_capacity = 128M
+innodb_log_buffer_size = 8M
+
+# ===== Connections =====
+max_connections = 50
+thread_cache_size = 20
+
+# ===== Per-connection buffers (KEEP SMALL) =====
+sort_buffer_size = 1M
+join_buffer_size = 1M
+read_buffer_size = 512K
+read_rnd_buffer_size = 512K
+
+# ===== Temp tables =====
+tmp_table_size = 32M
+max_heap_table_size = 32M
+
+# ===== Packet =====
+max_allowed_packet = 32M
+
+# ===== Durability vs speed =====
+innodb_flush_log_at_trx_commit = 2
+sync_binlog = 0
+
+# ===== IO =====
+innodb_flush_method = O_DIRECT
+
+# ===== Memory saving =====
+performance_schema = OFF
