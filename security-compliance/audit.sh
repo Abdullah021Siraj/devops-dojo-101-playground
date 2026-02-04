@@ -1058,29 +1058,92 @@ echo -e "\n------------------------------------------------------"
 echo -e "${CYAN}>>> PART 21: SUID/SGID BINARY AUDIT${NC}"
 
 # Known legitimate SUID binaries
+# Known legitimate SUID binaries
 KNOWN_SUID=(
+    # Core authentication
     "/usr/bin/sudo"
     "/usr/bin/su"
     "/usr/bin/passwd"
     "/usr/bin/chsh"
     "/usr/bin/chfn"
-    "/usr/bin/mount"
-    "/usr/bin/umount"
-    "/usr/bin/ping"
-    "/usr/bin/ping6"
     "/usr/bin/newgrp"
     "/usr/bin/gpasswd"
+    "/usr/bin/chage"
+    "/usr/bin/expiry"
+    
+    # Mount/filesystem
+    "/usr/bin/mount"
+    "/usr/bin/umount"
+    "/usr/bin/fusermount"
+    "/usr/bin/fusermount3"
+    
+    # Network utilities
+    "/usr/bin/ping"
+    "/usr/bin/ping6"
+    "/bin/ping"
+    "/bin/ping6"
+    
+    # Communication
+    "/usr/bin/wall"
+    "/usr/bin/write"
+    
+    # SSH
+    "/usr/bin/ssh-agent"
     "/usr/lib/openssh/ssh-keysign"
+    "/usr/libexec/openssh/ssh-keysign"
+    
+    # PAM authentication
+    "/usr/sbin/unix_chkpwd"
+    "/usr/sbin/pam_extrausers_chkpwd"
+    "/sbin/unix_chkpwd"
+    
+    # PolicyKit (privilege escalation framework)
+    "/usr/lib/polkit-1/polkit-agent-helper-1"
+    "/usr/libexec/polkit-1/polkit-agent-helper-1"
+    
+    # Mail system (Postfix)
+    "/usr/sbin/postdrop"
+    "/usr/sbin/postqueue"
+    
+    # Cron
+    "/usr/bin/crontab"
+    
+    # Terminal/lock utilities
+    "/usr/lib/x86_64-linux-gnu/utempter/utempter"
+    "/usr/bin/dotlockfile"
+    
+    # DBus
     "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
+    "/usr/libexec/dbus-1/dbus-daemon-launch-helper"
+    
+    # Screen/tmux helpers
+    "/usr/bin/screen"
+    "/usr/bin/tmux"
+)
+
+# Paths to EXCLUDE from SUID scanning (container filesystems)
+EXCLUDE_PATHS=(
+    "/var/lib/docker"
+    "/var/lib/containerd"
+    "/var/lib/kubelet"
+    "/proc"
+    "/sys"
+    "/dev"
 )
 
 FOUND_SUSPICIOUS_SUID=0
 
-# Find all SUID/SGID files
-find / -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | while read -r suid_file; do
+# Build exclusion pattern for find command
+EXCLUDE_PATTERN=""
+for excl in "${EXCLUDE_PATHS[@]}"; do
+    EXCLUDE_PATTERN="$EXCLUDE_PATTERN -path $excl -prune -o"
+done
+
+# Find all SUID/SGID files (excluding container paths)
+find / $EXCLUDE_PATTERN -type f \( -perm -4000 -o -perm -2000 \) -print 2>/dev/null | while read -r suid_file; do
     IS_KNOWN=0
     
-    # Check if it's in the known list
+    # Check if it's in the known list (exact match)
     for known in "${KNOWN_SUID[@]}"; do
         if [[ "$suid_file" == "$known" ]]; then
             IS_KNOWN=1
@@ -1088,6 +1151,22 @@ find / -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | while read -r suid
         fi
     done
     
+    # If not found, check if it's a known binary in an alternative location
+    # (e.g., /bin/ping vs /usr/bin/ping on different distros)
+    if [[ $IS_KNOWN -eq 0 ]]; then
+        BASENAME=$(basename "$suid_file")
+        for known in "${KNOWN_SUID[@]}"; do
+            if [[ "$BASENAME" == "$(basename "$known")" ]]; then
+                IS_KNOWN=1
+                log_result "INFO" "CIS 1.3.2" \
+                "Known SUID binary in alternate location: $suid_file" \
+                ""
+                break
+            fi
+        done
+    fi
+    
+    # Report unknown SUID/SGID binaries
     if [[ $IS_KNOWN -eq 0 ]]; then
         PERMS=$(stat -c "%a" "$suid_file")
         log_result "WARN" "CIS 1.3.2" \
