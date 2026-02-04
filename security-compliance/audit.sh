@@ -884,6 +884,112 @@ done
 echo -e "\n------------------------------------------------------"
 
 # =========================================================
+# PART 20: MALICIOUS SCRIPTS & UNAUTHORIZED SERVICES CHECK
+# =========================================================
+
+echo -e "${CYAN}>>> PART 20: MALICIOUS ACTIVITY CHECK${NC}"
+
+FOUND_MALICIOUS=0
+
+# ---------------------------------------------------------
+# Improved suspicious cron job detection
+# ---------------------------------------------------------
+APPROVED_CRON_CMDS=("/usr/bin/curl" "/usr/bin/wget")
+APPROVED_DOMAINS=("repo.company.com" "internal.api.local")
+
+CRON_FILE_ALLOWLIST=(
+    "/etc/cron.d/certbot"
+    "/etc/cron.d/php"
+)
+
+check_cron_file() {
+    local file="$1"
+
+    # Skip approved cron files
+    for allowed in "${CRON_FILE_ALLOWLIST[@]}"; do
+        if [[ "$file" == "$allowed" ]]; then
+            log_result "PASS" "PCI 2.2.4" \
+            "Approved system cron job detected: $file" \
+            "Vendor-managed cron"
+            return
+        fi
+    done
+
+    # Scan non-approved cron files
+    while read -r line; do
+        [[ "$line" =~ ^#|^$ ]] && continue
+
+        if echo "$line" | grep -Eiq "(curl|wget|nc|perl -e|python)"; then
+            log_result "FAIL" "PCI 2.2.4" \
+            "Unapproved cron job detected in $file" \
+            "Investigate command and destination"
+            FOUND_MALICIOUS=1
+            return
+        fi
+    done < "$file"
+}
+# Check system crons
+for cronfile in /etc/crontab /etc/cron.d/*; do
+    [ -f "$cronfile" ] && check_cron_file "$cronfile"
+done
+
+# ---------------------------------------------------------
+# Check for world-writable executable files (hardened)
+# ---------------------------------------------------------
+EXCLUDED_PATHS=("/var/lib/docker" "/var/lib/containerd")
+
+WW_EXEC=$(find / -type f \
+    -perm -0002 \
+    ! -name ".htaccess" \
+    ! -path "/var/www/*" \
+    -executable 2>/dev/null | \
+    grep -Ev "$(IFS='|'; echo "${EXCLUDED_PATHS[*]}")" | head -n 1)
+
+if [ -n "$WW_EXEC" ]; then
+    log_result "FAIL" "PCI 2.2.2" \
+    "World-writable executable file found: $WW_EXEC" \
+    "Remove write permissions: chmod o-w <file>"
+    FOUND_MALICIOUS=1
+fi
+
+# ---------------------------------------------------------
+# Check for suspicious running processes
+# ---------------------------------------------------------
+SUSPICIOUS_PROCS=("xmrig" "minerd" "kthreadd" "crypto" "botnet")
+
+for proc in "${SUSPICIOUS_PROCS[@]}"; do
+    if ps aux | grep -v grep | grep -qi "$proc"; then
+        log_result "FAIL" "PCI 5.1.1" \
+        "Suspicious process running: $proc" \
+        "Investigate and terminate immediately"
+        FOUND_MALICIOUS=1
+    fi
+done
+
+# ---------------------------------------------------------
+# Check for suspicious files in /tmp
+# ---------------------------------------------------------
+TMP_SCRIPTS=$(find /tmp -type f \( -name "*.sh" -o -name "*.py" -o -name "*.pl" \) 2>/dev/null | head -n 1)
+
+if [ -n "$TMP_SCRIPTS" ]; then
+    log_result "WARN" "PCI 5.1.2" \
+    "Executable scripts found in /tmp" \
+    "Review and remove suspicious temporary files"
+    FOUND_MALICIOUS=1
+fi
+
+# ---------------------------------------------------------
+# PASS if no malicious activity found
+# ---------------------------------------------------------
+if [ "$FOUND_MALICIOUS" -eq 0 ]; then
+    log_result "PASS" "PCI 5.1" \
+    "No malicious scripts or unauthorized services detected" \
+    "System compliant"
+fi
+
+echo -e "\n------------------------------------------------------"
+
+# =========================================================
 # FINAL SUMMARY
 # =========================================================
 echo -e "\n${YELLOW}======================================================${NC}"
