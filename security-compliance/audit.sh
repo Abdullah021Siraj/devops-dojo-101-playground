@@ -36,6 +36,25 @@ WARN_COUNT=0
 INFO_COUNT=0
 # ---------------------
 
+# INPUT VALIDATION
+validate_config() {
+    # Validate LOG_RETENTION_DAYS
+    if ! [[ "$LOG_RETENTION_DAYS" =~ ^[0-9]+$ ]] || [[ "$LOG_RETENTION_DAYS" -lt 1 ]]; then
+        echo -e "${RED}ERROR: LOG_RETENTION_DAYS must be a positive integer${NC}"
+        exit 1
+    fi
+    
+    # Validate GLOBAL_ALLOW_LIST contains only valid port numbers
+    for port in "${GLOBAL_ALLOW_LIST[@]}"; do
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+            echo -e "${RED}ERROR: Invalid port in GLOBAL_ALLOW_LIST: $port${NC}"
+            exit 1
+        fi
+    done
+}
+
+validate_config
+
 # PRIVILEGE CHECK
 if [[ $EUID -ne 0 ]]; then
    echo -e "${RED}ERROR: This script must be run as root (or with sudo)${NC}" 
@@ -53,7 +72,7 @@ check_command() {
 }
 
 check_command "ss" "iproute2"
-check_command "awk" "gawk"
+check_command "awk" "gawk"audit
 check_command "stat" "coreutils"
 
 # =========================================================
@@ -67,8 +86,15 @@ fi
 
 # 2. Perform Log Rotation (Cleanup old logs)
 echo -e "${BLUE}Performing log rotation (Retention: $LOG_RETENTION_DAYS days)...${NC}"
-# Find files in LOG_DIR ending in .log, older than X days, and delete them
-find "$LOG_DIR" -name "audit_*.log" -type f -mtime +$LOG_RETENTION_DAYS -delete
+
+# Archive current log if it exists
+if [ -f "$LOG_FILE" ]; then
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+    mv "$LOG_FILE" "${LOG_DIR}/audit_${TIMESTAMP}.log"
+fi
+
+# Delete old archived logs
+find "$LOG_DIR" -name "audit_*.log" -type f -mtime +$LOG_RETENTION_DAYS -delete 2>/dev/null
 
 # 3. Start Logging
 exec > >(tee -a "$LOG_FILE")
@@ -450,12 +476,14 @@ echo -e "\n------------------------------------------------------"
 # =========================================================
 echo -e "${CYAN}>>> PART 9: NETWORK PORT EXPOSURE ANALYSIS${NC}"
 
-ss -tuln | awk 'NR>1 {print $5}' | while read -r SOCKET; do
-    
+# Store ss output to avoid repeated calls
+mapfile -t LISTENING_SOCKETS < <(ss -tuln | awk 'NR>1 {print $5}')
+
+for SOCKET in "${LISTENING_SOCKETS[@]}"; do
     # Extract IP and Port
-    PORT=$(echo $SOCKET | rev | cut -d: -f1 | rev)
-    IP=$(echo $SOCKET | rev | cut -d: -f2- | rev)
-    IP=$(echo $IP | tr -d '[]') # Clean brackets from IPv6
+    PORT=$(echo "$SOCKET" | rev | cut -d: -f1 | rev)
+    IP=$(echo "$SOCKET" | rev | cut -d: -f2- | rev)
+    IP=$(echo "$IP" | tr -d '[]') # Clean brackets from IPv6
 
     # CHECK 1: LOCALHOST (Safe)
     if [[ "$IP" == "127.0.0.1" ]] || [[ "$IP" == "::1" ]] || [[ "$IP" == *"127.0.0."* ]]; then
@@ -566,22 +594,47 @@ echo -e "\n------------------------------------------------------"
 echo -e "${CYAN}>>> PART 11: CONTAINER RUNTIME (Docker)${NC}"
 
 if command -v docker >/dev/null; then
-    log_result "INFO" "System" "Docker detected" ""
+    # Check if any containers are running first
+    CONTAINER_COUNT=$(docker ps --quiet | wc -l)
     
-    # Check Docker Socket Permissions
-    if [ -S /var/run/docker.sock ]; then
-        SOCK_PERM=$(stat -c "%a" /var/run/docker.sock)
-        if [[ "$SOCK_PERM" == "660" ]]; then
-            log_result "PASS" "CIS Docker 3.1" "Docker Socket permissions secure (660)" ""
-        else
-            log_result "WARN" "CIS Docker 3.1" "Docker Socket permissions are $SOCK_PERM" "Should be 660 (root:docker)"
-        fi
+    if [[ $CONTAINER_COUNT -eq 0 ]]; then
+        log_result "INFO" "CIS Docker" "No running containers detected"
     else
-        log_result "INFO" "System" "Docker socket not active or not found at default path" ""
+        # Check for privileged containers
+        PRIVILEGED=$(docker ps --quiet | xargs docker inspect --format='{{.Name}} {{.HostConfig.Privileged}}' 2>/dev/null | grep "true" | wc -l)
+        
+        if [[ $PRIVILEGED -gt 0 ]]; then
+            log_result "FAIL" "CIS Docker 5.4" "$PRIVILEGED privileged containers running" "Avoid --privileged flag"
+        else
+            log_result "PASS" "CIS Docker 5.4" "No privileged containers" ""
+        fi
+        
+        # Check containers running as root
+        ROOT_CONTAINERS=$(docker ps --quiet | xargs docker inspect --format='{{.Name}} {{.Config.User}}' 2>/dev/null | grep -E "^ |^$" | wc -l)
+        
+        if [[ $ROOT_CONTAINERS -gt 0 ]]; then
+            log_result "WARN" "CIS Docker 4.1" "$ROOT_CONTAINERS containers running as root" "Use --user flag"
+        else
+            log_result "PASS" "CIS Docker 4.1" "All containers run as non-root" ""
+        fi
+        
+        # Check for containers with host network
+        HOST_NET=$(docker ps --quiet | xargs docker inspect --format='{{.Name}} {{.HostConfig.NetworkMode}}' 2>/dev/null | grep "host" | wc -l)
+        
+        if [[ $HOST_NET -gt 0 ]]; then
+            log_result "FAIL" "CIS Docker 5.9" "$HOST_NET containers using host network" "Avoid --network=host"
+        else
+            log_result "PASS" "CIS Docker 5.9" "No containers using host network" ""
+        fi
     fi
     
-else
-    echo "Docker not found. Skipping."
+    # Check Docker daemon logging (works regardless of container count)
+    DOCKER_LOG=$(docker info 2>/dev/null | grep "Logging Driver" | awk '{print $3}')
+    if [[ "$DOCKER_LOG" != "json-file" ]] && [[ -n "$DOCKER_LOG" ]]; then
+        log_result "WARN" "CIS Docker 2.12" "Docker logging driver: $DOCKER_LOG" "Consider json-file driver"
+    elif [[ -n "$DOCKER_LOG" ]]; then
+        log_result "PASS" "CIS Docker 2.12" "Docker logging properly configured" ""
+    fi
 fi
 
 
@@ -915,19 +968,28 @@ check_cron_file() {
         fi
     done
 
-    # Scan non-approved cron files
+    # Scan for SUSPICIOUS patterns (not just any curl/wget)
     while read -r line; do
         [[ "$line" =~ ^#|^$ ]] && continue
 
-        if echo "$line" | grep -Eiq "(curl|wget|nc|perl -e|python)"; then
+        # Check for highly suspicious patterns
+        if echo "$line" | grep -Eiq "(curl.*\|.*sh|wget.*\|.*bash|nc.*-e|perl -e.*socket|python.*base64|/dev/tcp|mkfifo)"; then
             log_result "FAIL" "PCI 2.2.4" \
-            "Unapproved cron job detected in $file" \
-            "Investigate command and destination"
+            "HIGHLY SUSPICIOUS cron job in $file: $line" \
+            "Investigate immediately - potential backdoor"
             FOUND_MALICIOUS=1
             return
         fi
+        
+        # Check for downloads to unusual destinations
+        if echo "$line" | grep -Eiq "(curl|wget).*http" && ! echo "$line" | grep -Eiq "(${APPROVED_DOMAINS[*]// /|})"; then
+            log_result "WARN" "PCI 2.2.4" \
+            "Cron job downloads from external source in $file" \
+            "Verify legitimacy: $line"
+        fi
     done < "$file"
 }
+
 # Check system crons
 for cronfile in /etc/crontab /etc/cron.d/*; do
     [ -f "$cronfile" ] && check_cron_file "$cronfile"
@@ -985,6 +1047,109 @@ if [ "$FOUND_MALICIOUS" -eq 0 ]; then
     log_result "PASS" "PCI 5.1" \
     "No malicious scripts or unauthorized services detected" \
     "System compliant"
+fi
+
+echo -e "\n------------------------------------------------------"
+
+# =========================================================
+# PART 21: SUID/SGID BINARY AUDIT
+# =========================================================
+
+echo -e "${CYAN}>>> PART 21: SUID/SGID BINARY AUDIT${NC}"
+
+# Known legitimate SUID binaries
+KNOWN_SUID=(
+    "/usr/bin/sudo"
+    "/usr/bin/su"
+    "/usr/bin/passwd"
+    "/usr/bin/chsh"
+    "/usr/bin/chfn"
+    "/usr/bin/mount"
+    "/usr/bin/umount"
+    "/usr/bin/ping"
+    "/usr/bin/ping6"
+    "/usr/bin/newgrp"
+    "/usr/bin/gpasswd"
+    "/usr/lib/openssh/ssh-keysign"
+    "/usr/lib/dbus-1.0/dbus-daemon-launch-helper"
+)
+
+FOUND_SUSPICIOUS_SUID=0
+
+# Find all SUID/SGID files
+find / -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null | while read -r suid_file; do
+    IS_KNOWN=0
+    
+    # Check if it's in the known list
+    for known in "${KNOWN_SUID[@]}"; do
+        if [[ "$suid_file" == "$known" ]]; then
+            IS_KNOWN=1
+            break
+        fi
+    done
+    
+    if [[ $IS_KNOWN -eq 0 ]]; then
+        PERMS=$(stat -c "%a" "$suid_file")
+        log_result "WARN" "CIS 1.3.2" \
+        "Unexpected SUID/SGID binary ($PERMS): $suid_file" \
+        "Verify if this binary requires elevated privileges"
+        FOUND_SUSPICIOUS_SUID=1
+    fi
+done
+
+if [[ $FOUND_SUSPICIOUS_SUID -eq 0 ]]; then
+    log_result "PASS" "CIS 1.3.2" \
+    "All SUID/SGID binaries are known and authorized" \
+    ""
+fi
+
+echo -e "\n------------------------------------------------------"
+
+# =========================================================
+# PART 22: NETWORK INTERFACE PROMISCUOUS MODE CHECK
+# =========================================================
+
+echo -e "${CYAN}>>> PART 22: PROMISCUOUS MODE DETECTION${NC}"
+
+PROMISC_FOUND=0
+
+# Check all network interfaces for promiscuous mode
+ip link show | grep -i promisc | while read -r line; do
+    INTERFACE=$(echo "$line" | awk '{print $2}' | tr -d ':')
+    log_result "FAIL" "Security" \
+    "Interface $INTERFACE is in PROMISCUOUS mode (potential packet sniffing)" \
+    "Investigate: ip link set $INTERFACE promisc off"
+    PROMISC_FOUND=1
+done
+
+if [[ $PROMISC_FOUND -eq 0 ]]; then
+    log_result "PASS" "Security" \
+    "No interfaces in promiscuous mode detected" \
+    ""
+fi
+
+echo -e "\n------------------------------------------------------"
+
+# =========================================================
+# PART 23: ZOMBIE PROCESS DETECTION
+# =========================================================
+
+echo -e "${CYAN}>>> PART 23: ZOMBIE PROCESS CHECK${NC}"
+
+ZOMBIE_COUNT=$(ps aux | awk '{print $8}' | grep -c '^Z')
+
+if [[ $ZOMBIE_COUNT -gt 10 ]]; then
+    log_result "FAIL" "System" \
+    "$ZOMBIE_COUNT zombie processes detected" \
+    "Investigate parent processes - potential malware or system instability"
+elif [[ $ZOMBIE_COUNT -gt 0 ]]; then
+    log_result "WARN" "System" \
+    "$ZOMBIE_COUNT zombie processes detected" \
+    "Monitor system - may indicate application issues"
+else
+    log_result "PASS" "System" \
+    "No zombie processes detected" \
+    ""
 fi
 
 echo -e "\n------------------------------------------------------"
