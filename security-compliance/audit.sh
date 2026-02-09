@@ -944,6 +944,76 @@ echo -e "${CYAN}>>> PART 20: MALICIOUS ACTIVITY CHECK${NC}"
 
 FOUND_MALICIOUS=0
 
+
+# ---------------------------------------------------------
+# Scan for malicious shell scripts & quarantine them
+# ---------------------------------------------------------
+SCRIPT_PATHS=(
+    "/etc"
+    "/usr/local/bin"
+    "/usr/local/sbin"
+    "/var/tmp"
+    "/dev/shm"
+)
+
+MALICIOUS_PATTERNS="\
+(eval\s|\bsource\s*<\(|bash\s+-c|sh\s+-c|\
+base64\s+-d|openssl\s+enc|\
+curl.*\|\s*(sh|bash)|wget.*\|\s*(sh|bash)|\
+/dev/tcp|mkfifo|nc\s+-e)"
+
+scan_and_quarantine_script() {
+    local script="$1"
+
+    if grep -Eiq "$MALICIOUS_PATTERNS" "$script"; then
+        local base
+        base=$(basename "$script")
+        local quarantine_file="$QUARANTINE_DIR/${base}.$(date +%s)"
+
+        mv "$script" "$quarantine_file"
+        chmod 000 "$quarantine_file"
+
+        log_result "FAIL" "PCI 5.1.2" \
+        "Malicious script quarantined: $script" \
+        "Moved to quarantine: $quarantine_file"
+
+        FOUND_MALICIOUS=1
+    fi
+}
+
+for path in "${SCRIPT_PATHS[@]}"; do
+    [ -d "$path" ] || continue
+
+    find "$path" -type f -name "*.sh" -perm /111 2>/dev/null | while read -r script; do
+        scan_and_quarantine_script "$script"
+    done
+done
+
+# ---------------------------------------------------------
+# Inspect scripts referenced by systemd services
+# ---------------------------------------------------------
+systemctl list-unit-files --type=service --no-legend | awk '{print $1}' | while read -r svc; do
+    exec_path=$(systemctl show "$svc" -p ExecStart --value 2>/dev/null | \
+                grep -Eo '/[^ ]+\.sh' | head -n 1)
+
+    if [ -n "$exec_path" ] && [ -f "$exec_path" ]; then
+        scan_and_quarantine_script "$exec_path"
+    fi
+done
+
+# ---------------------------------------------------------
+# Quarantine scripts running from /tmp-like locations
+# ---------------------------------------------------------
+ps -eo pid,cmd | grep -E '/(tmp|dev/shm|var/tmp)/.*\.sh' | grep -v grep | while read -r pid cmd; do
+    script=$(echo "$cmd" | awk '{print $2}')
+
+    if [ -f "$script" ]; then
+        kill -9 "$pid"
+        scan_and_quarantine_script "$script"
+    fi
+done
+
+
 # ---------------------------------------------------------
 # Improved suspicious cron job detection
 # ---------------------------------------------------------
@@ -1039,14 +1109,17 @@ if [ -n "$TMP_SCRIPTS" ]; then
     "Review and remove suspicious temporary files"
     FOUND_MALICIOUS=1
 fi
-
 # ---------------------------------------------------------
-# PASS if no malicious activity found
+# FINAL RESULT — Malicious Activity Verdict
 # ---------------------------------------------------------
 if [ "$FOUND_MALICIOUS" -eq 0 ]; then
     log_result "PASS" "PCI 5.1" \
-    "No malicious scripts or unauthorized services detected" \
+    "No malicious scripts, persistence mechanisms, or unauthorized services detected" \
     "System compliant"
+else
+    log_result "INFO" "PCI 5.1" \
+    "Malicious artifacts detected and quarantined" \
+    "Review quarantine directory: $QUARANTINE_DIR"
 fi
 
 echo -e "\n------------------------------------------------------"
